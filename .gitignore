@@ -1,16 +1,26 @@
+<<<<<<< Updated upstream
 # ─── Python Basics ───────────────────────────
+=======
+# Python cache & bytecode
+>>>>>>> Stashed changes
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+<<<<<<< Updated upstream
 *.pyc
 *.log
 
 # ─── Entornos Virtuales (sin nombrar rutas exactas) ─────
+=======
+
+# Entornos virtuales
+>>>>>>> Stashed changes
 */bin/
 */lib/
 */include/
 */pyvenv.cfg
+<<<<<<< Updated upstream
 
 # ─── Archivos Temporales del Sistema ─────────
 *.swp
@@ -89,3 +99,38 @@ public/
 *.7z
 *.rar
 
+=======
+.venv/
+venv/
+env/
+
+# Archivos sensibles
+config.yaml
+*.db
+*.sqlite3
+xss_payloads.txt
+user_agents.txt
+proxies.txt
+
+# Archivos temporales o resultados
+output/
+*.log
+*.tmp
+*.bak
+*.orig
+
+# IDEs y configuraciones personales
+.vscode/
+.idea/
+*.code-workspace
+
+# Payloads, datos masivos, herramientas
+dirsearch/
+utils/
+app_hacking/
+gen_vi.db
+
+# Exclusión inversa para mantener el README
+!README.md
+
+>>>>>>> Stashed changes

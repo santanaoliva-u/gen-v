@@ -1,0 +1,23 @@
+<!-- modules/xss_lab/public/index.html -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Laboratorio XSS DOM</title>
+</head>
+<body>
+    <h1>Laboratorio XSS DOM CazaDivina</h1>
+    <p>Parámetro 'msg' en la URL para inyección:</p>
+    <div id="output"></div>
+    <script>
+        document.cookie = "adminToken=supersecreto123; path=/";
+        localStorage.setItem('userId', '1337');
+        sessionStorage.setItem('sessionKey', 'abcxyz');
+        const urlParams = new URLSearchParams(window.location.search);
+        const message = urlParams.get('msg');
+        if (message) {
+            document.getElementById('output').innerHTML = message;
+        }
+    </script>
+</body>
+</html>
