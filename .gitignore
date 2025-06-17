@@ -1,0 +1,91 @@
+# ─── Python Basics ───────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.log
+
+# ─── Entornos Virtuales (sin nombrar rutas exactas) ─────
+*/bin/
+*/lib/
+*/include/
+*/pyvenv.cfg
+
+# ─── Archivos Temporales del Sistema ─────────
+*.swp
+*.swo
+*.bak
+*.tmp
+*.orig
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+desktop.ini
+
+# ─── Archivos de Configuración y Sensibles ───
+*.env
+*.ini
+*.cfg
+*.yaml
+*.yml
+*.pem
+*.key
+*.crt
+*.sqlite3
+*.db
+
+# ─── Cachés de Herramientas y Testing ────────
+.mypy_cache/
+.pytest_cache/
+.tox/
+.nox/
+.cache
+coverage.*
+htmlcov/
+
+# ─── Distribución y Empaquetado ──────────────
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# ─── IDEs y Herramientas ─────────────────────
+*.code-workspace
+.vscode/
+.idea/
+
+# ─── Datos Generados por Herramientas ────────
+*_report/
+*_scan/
+*_output/
+recon/
+fuzzing/
+loot/
+results/
+xss_server/
+public/
+*.pcap
+*.cap
+*.har
+*.xml
+*.json
+*.csv
+
+# ─── Payloads y Listas ───────────────────────
+*.txt
+!README.md
+
+# ─── Documentación y Reportes ────────────────
+*.pdf
+*.docx
+*.md.bak
+
+# ─── Otros ───────────────────────────────────
+*.tar
+*.zip
+*.7z
+*.rar
+
