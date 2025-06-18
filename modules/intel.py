@@ -1,6 +1,6 @@
 # modules/intel.py
 import logging
-from database import Database
+from  modules.database import Database
 
 log = logging.getLogger(__name__)
 

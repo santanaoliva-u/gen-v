@@ -3,7 +3,7 @@ import os
 import time
 import logging
 import subprocess
-from database import Database
+from modules.database import Database
 
 log = logging.getLogger(__name__)
 

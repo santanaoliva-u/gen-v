@@ -3,7 +3,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from utils.tool_wrapper import run_tool, is_tool_available
-from database import Database
+from modules.database import Database
 import psutil
 
 log = logging.getLogger(__name__)

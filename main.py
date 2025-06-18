@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 # Importaciones de tus módulos locales
-from database import Database
+from modules.database import Database
 from utils.tool_wrapper import is_tool_available # Importa la función específica
 
 # --- Configuración de Logging Estructurado ---
