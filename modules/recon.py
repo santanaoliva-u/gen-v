@@ -1,62 +1,87 @@
 # modules/recon.py
-# Este archivo define el módulo ReconModule, que realiza reconocimiento de dominios y URLs.
+"""
+Módulo de reconocimiento para el pipeline de CazaDivina.
+Ejecuta herramientas de reconocimiento y almacena resultados en la base de datos.
+"""
 
-import logging  # Para registrar mensajes (logs)
-import asyncio  # Para manejar tareas asíncronas
-from typing import List, Dict, Any  # Para definir tipos de datos
-from modules.tool_wrapper import run_tool, is_tool_available  # Importa funciones para ejecutar y verificar herramientas
-from modules.database import Database  # Clase para interactuar con la base de datos
-from modules.config import CONFIG  # Configuración del proyecto
+import logging
+import json
+import asyncio
+from typing import List, Optional
+from modules.tool_wrapper import run_tool
+from modules.database import Database
 
-# Configura el logger para este módulo
 log = logging.getLogger(__name__)
+
+class JsonFormatter(logging.Formatter):
+    """Formatea los logs como JSON para que sean fáciles de leer y analizar."""
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "timestamp": record.created,
+            "level": record.levelname,
+            "module": record.name,
+            "message": record.getMessage(),
+            "file": record.pathname,
+            "line": record.lineno
+        }
+        return json.dumps(log_entry, ensure_ascii=False)
+
+# Configura el logger para ReconModule
+formatter = JsonFormatter()
+for handler in log.handlers:
+    handler.setFormatter(formatter)
 
 class ReconModule:
     def __init__(self):
-        """Inicializa el módulo de reconocimiento."""
-        self.required_tools = [
-            'amass', 'subfinder', 'assetfinder', 'findomain', 'dnsx', 'httpx',
-            'waybackurls', 'gau', 'katana'
-        ]
+        self.db = None
 
-    async def run(self, data: Any) -> List[Dict]:
-        """Ejecuta el reconocimiento para un programa dado."""
+    async def run(self, program_name: Optional[str]) -> List[dict]:
         log.info("Iniciando reconocimiento...")
-        # Verifica que todas las herramientas estén disponibles
-        missing_tools = [tool for tool in self.required_tools if not is_tool_available(tool)]
-        if missing_tools:
-            log.error(f"Herramientas faltantes para ReconModule: {', '.join(missing_tools)}")
-            return []
-
-        program_name = data if isinstance(data, str) else data.get('program_name', 'Unknown')
         results = []
-        db = await Database()
+        if not program_name:
+            log.error("No se proporcionó un programa objetivo.")
+            return results
 
-        # Ejemplo: Usa assetfinder para encontrar subdominios
         try:
-            cmd = ["assetfinder", "--subs-only", program_name]
-            output = run_tool(cmd)
-            subdomains = output.get('stdout', '').splitlines()
-            for subdomain in subdomains:
-                if subdomain:
-                    results.append({"target": subdomain, "program_name": program_name})
-                    await db.insert_finding_async(
-                        program_name, subdomain, f"https://{subdomain}", "Subdominio encontrado", "Recon", 2.0
-                    )
-        except Exception as e:
-            log.error(f"Error ejecutando assetfinder: {e}")
+            # Ejecutar herramientas de reconocimiento
+            assetfinder_output = run_tool(f"assetfinder --subs-only {program_name}")
+            if assetfinder_output:
+                for domain in assetfinder_output.splitlines():
+                    if domain.strip():
+                        results.append({
+                            "program_name": program_name,
+                            "asset": domain.strip(),
+                            "vuln_type": "Recon",
+                            "severity": 0.0,
+                            "description": f"Subdominio encontrado: {domain}"
+                        })
 
-        # Ejemplo: Usa httpx para verificar subdominios activos
-        try:
-            cmd = ["httpx", "-silent", "-o", f"output/{program_name}/httpx.txt"]
-            output = run_tool(cmd, input='\n'.join([r['target'] for r in results]))
-            active_urls = output.get('stdout', '').splitlines()
-            for url in active_urls:
-                if url:
-                    results.append({"target": url, "program_name": program_name, "url": url})
-        except Exception as e:
-            log.error(f"Error ejecutando httpx: {e}")
+            # Validar resultados con httpx
+            if results:
+                domains = [r["asset"] for r in results]
+                httpx_input = "\n".join(domains)
+                httpx_output = run_tool("httpx -silent", input_data=httpx_input)
+                if httpx_output:
+                    live_domains = httpx_output.splitlines()
+                    results = [r for r in results if r["asset"] in live_domains]
 
-        await db.close_all()
-        log.info(f"Reconocimiento completado para {program_name}. Encontrados {len(results)} resultados.")
+            # Guardar resultados en la base de datos
+            self.db = await Database()
+            for result in results:
+                await self.db.insert_finding_async(
+                    result["program_name"],
+                    result["asset"],
+                    "",
+                    result["description"],
+                    result["vuln_type"],
+                    result["severity"]
+                )
+
+            log.info(f"Reconocimiento completado para {program_name}. Encontrados {len(results)} resultados.")
+        except Exception as e:
+            log.error(f"Error en reconocimiento: {e}", exc_info=True)
+        finally:
+            if self.db:
+                await self.db.close_all()
+
         return results

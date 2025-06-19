@@ -6,25 +6,25 @@ Carga la configuración desde config.yaml, inicializa módulos y ejecuta pruebas
 Usa concurrencia para ejecutar módulos en paralelo, registra logs en formato JSON y envía logs a Telegram en tiempo real.
 """
 
-import argparse
-import logging
-import logging.handlers
-import yaml
-import importlib
-import sys
-import time
-import json
-import psutil
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from typing import Dict, List, Optional, Any
-from graphlib import TopologicalSorter, CycleError
+import argparse  # Para manejar argumentos de la línea de comandos
+import logging  # Para registrar mensajes (logs)
+import logging.handlers  # Para rotar archivos de log
+import yaml  # Para leer el archivo de configuración (config.yaml)
+import importlib  # Para importar módulos dinámicamente
+import sys  # Para manejar el sistema (como salir del programa)
+import time  # Para medir el tiempo de ejecución
+import json  # Para formatear logs como JSON
+import psutil  # Para obtener información del sistema (como número de CPUs)
+import asyncio  # Para manejar tareas asíncronas
+from concurrent.futures import ThreadPoolExecutor, as_completed  # Para ejecutar tareas en paralelo
+from datetime import datetime  # Para obtener la fecha y hora
+from typing import Dict, List, Optional, Any  # Para definir tipos de datos
+from graphlib import TopologicalSorter, CycleError  # Para validar dependencias
 
 # Importaciones locales
-from modules.database import Database
-from modules.tool_wrapper import run_tool, is_tool_available
-from modules.telegram_reporter import setup_telegram_logging
+from modules.database import Database  # Clase para interactuar con la base de datos
+from modules.tool_wrapper import run_tool, is_tool_available  # Funciones para ejecutar herramientas
+from modules.telegram_reporter import setup_telegram_logging  # Módulo para enviar logs a Telegram
 
 # Configuración de Logging estructurado
 class JsonFormatter(logging.Formatter):
@@ -42,7 +42,7 @@ class JsonFormatter(logging.Formatter):
 
 # Configura el logger
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.DEBUG)  # Cambiado a DEBUG para capturar más detalles
 file_handler = logging.handlers.RotatingFileHandler(
     filename='output/system.log', maxBytes=10*1024*1024, backupCount=5
 )
@@ -52,27 +52,33 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(JsonFormatter())
 log.addHandler(console_handler)
 
-# Tipos de vulnerabilidades permitidos
-VALID_VULN_TYPES = {
-    'XSS Reflejado', 'DOM XSS', 'XSS (POST)', 'SQLi', 'LFI', 'Command Injection',
-    'CRLF Injection', 'File Upload', 'Backdoor', 'CVE', 'Recon', 'Intel'
-}
-
 class Orchestrator:
+    """
+    Clase Orchestrator: Coordina la ejecución de módulos en el pipeline.
+    Carga la configuración, inicializa la base de datos y ejecuta módulos respetando dependencias.
+    """
     def __init__(self, config_file: str = "config.yaml"):
+        """
+        Inicializa el orquestador con un archivo de configuración.
+        Args:
+            config_file: Ruta al archivo config.yaml (por defecto: "config.yaml").
+        """
         self.db = None
         self.modules: List[Any] = []
         self.config: Dict[str, Any] = {}
         self.scope: Dict[str, Any] = {}
         self.module_dependencies: Dict[str, List[str]] = {}
         self.max_workers = min(10, psutil.cpu_count(logical=True) * 2 or 1)
-        self.module_timeout = 600
+        self.module_timeout = 600  # Timeout por módulo en segundos
         self._load_config(config_file)
 
     async def initialize(self):
+        """
+        Inicializa la base de datos, valida el entorno y configura logging para Telegram.
+        """
         try:
             log.info("Inicializando orquestador...")
-            setup_telegram_logging()
+            setup_telegram_logging()  # Configura el envío de logs a Telegram
             self.db = await Database()
             await self.validate_environment()
             self._validate_module_dependencies()
@@ -82,6 +88,11 @@ class Orchestrator:
             sys.exit(1)
 
     def _load_config(self, config_file: str):
+        """
+        Carga y valida el archivo de configuración (config.yaml).
+        Args:
+            config_file: Ruta al archivo de configuración.
+        """
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 self.config = yaml.safe_load(f) or {}
@@ -123,6 +134,14 @@ class Orchestrator:
             sys.exit(1)
 
     def _wrap_async_run(self, async_run):
+        """
+        Convierte un método asíncrono en síncrono para compatibilidad con ThreadPoolExecutor.
+        Usa un nuevo bucle de eventos para evitar conflictos.
+        Args:
+            async_run: Método asíncrono a envolver.
+        Returns:
+            Función síncrona que ejecuta el método asíncrono.
+        """
         def sync_run(*args, **kwargs):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -133,6 +152,7 @@ class Orchestrator:
         return sync_run
 
     def _validate_config_schema(self):
+        """Verifica que el archivo config.yaml tenga las claves necesarias."""
         required_keys = ['modules', 'scope']
         for key in required_keys:
             if key not in self.config:
@@ -143,6 +163,10 @@ class Orchestrator:
             sys.exit(1)
 
     def _validate_module_dependencies(self):
+        """
+        Verifica que no haya ciclos en las dependencias de los módulos.
+        Usa TopologicalSorter para detectar ciclos.
+        """
         try:
             sorter = TopologicalSorter(self.module_dependencies)
             list(sorter.static_order())
@@ -151,6 +175,7 @@ class Orchestrator:
             sys.exit(1)
 
     async def validate_environment(self):
+        """Verifica que todas las herramientas necesarias estén instaladas."""
         log.info("Validando entorno...")
         required_tools = [
             'amass', 'subfinder', 'assetfinder', 'findomain', 'dnsx', 'httpx',
@@ -163,6 +188,13 @@ class Orchestrator:
         log.info("Todas las herramientas están disponibles.")
 
     async def run_full_pipeline(self, program_name: str, selected_modules: Optional[List[str]] = None):
+        """
+        Ejecuta todos los módulos en el pipeline para un programa dado.
+        Respeta las dependencias entre módulos y usa concurrencia.
+        Args:
+            program_name: Nombre del programa objetivo (por ejemplo, "test").
+            selected_modules: Lista opcional de módulos a ejecutar.
+        """
         start_time = time.time()
         log.info(f"Iniciando pipeline para: '{program_name}'")
         data: Any = program_name
@@ -184,19 +216,16 @@ class Orchestrator:
                     dependencies = self.module_dependencies.get(module_name, [])
                     if all(dep in executed_module_names for dep in dependencies):
                         future = executor.submit(self._run_module, module, data, program_name)
-                        futures[future] = (module_name, time.time())
+                        futures[future] = module_name
                 if not futures:
                     log.error("No hay módulos listos para ejecutar. Posible ciclo de dependencias.")
                     break
                 for future in as_completed(futures, timeout=self.module_timeout):
-                    module_name, module_start = futures[future]
+                    module_name = futures[future]
+                    module_start = time.time()
                     try:
                         result = future.result()
                         if result is not None:
-                            if isinstance(result, list):
-                                result = [r for r in result if r]  # Filtrar elementos vacíos
-                            if not result:
-                                log.warning(f"Módulo '{module_name}' no produjo resultados válidos.")
                             data = result
                         module_duration = time.time() - module_start
                         log.info(f"Módulo '{module_name}' completado en {module_duration:.2f} segundos.")
@@ -210,36 +239,39 @@ class Orchestrator:
         log.info(f"Pipeline completado para '{program_name}' en {execution_time:.2f} segundos")
 
     def _run_module(self, module: Any, data: Any, program_name: Optional[str]):
+        """
+        Ejecuta un módulo con los datos proporcionados.
+        Args:
+            module: Instancia del módulo a ejecutar.
+            data: Datos de entrada para el módulo.
+            program_name: Nombre del programa objetivo.
+        Returns:
+            Resultado del módulo (puede ser None).
+        """
         module_name = module.__class__.__name__
         input_for_module = program_name if module_name == "IntelModule" else data
         try:
-            if input_for_module is None or (isinstance(input_for_module, list) and not input_for_module):
-                log.warning(f"Entrada vacía para el módulo '{module_name}'. Omitiendo ejecución.")
-                return []
-            result = module.run(input_for_module)
-            # Filtrar resultados para asegurar que vuln_type sea válido
-            if isinstance(result, list):
-                filtered_results = []
-                for item in result:
-                    if isinstance(item, dict) and 'vuln_type' in item:
-                        if item['vuln_type'] not in VALID_VULN_TYPES:
-                            log.warning(f"vuln_type inválido en {module_name}: {item['vuln_type']}. Ajustando a 'Recon'.")
-                            item['vuln_type'] = 'Recon'
-                    filtered_results.append(item)
-                return filtered_results
-            return result
+            return module.run(input_for_module)
         except Exception as e:
             log.error(f"Error ejecutando módulo '{module_name}' para '{program_name}': {e}", exc_info=True)
             raise
 
     async def run_single_module(self, module_name: str, program_name: Optional[str] = None):
+        """
+        Ejecuta un módulo específico.
+        Args:
+            module_name: Nombre del módulo a ejecutar (por ejemplo, "ReconModule").
+            program_name: Nombre del programa objetivo (opcional).
+        Returns:
+            Resultado del módulo.
+        """
         log.info(f"Ejecutando módulo: '{module_name}'")
         for module in self.modules:
             if module.__class__.__name__ == module_name:
                 start_time = time.time()
                 try:
                     result = self._run_module(module, program_name if module_name == "IntelModule" else None, program_name)
-                    duration = time.time() - module_start
+                    duration = time.time() - start_time
                     log.info(f"Módulo '{module_name}' ejecutado en {duration:.2f} segundos.")
                     return result
                 except Exception as e:
@@ -249,10 +281,18 @@ class Orchestrator:
         sys.exit(1)
 
     async def _send_discord_alert(self, message: str):
+        """
+        Envía una alerta a Discord (desactivado porque no se usa).
+        Args:
+            message: Mensaje de la alerta.
+        """
         log.debug(f"Alerta de Discord desactivada: {message}")
         return
 
 async def main():
+    """
+    Función principal que maneja los argumentos y ejecuta el pipeline.
+    """
     parser = argparse.ArgumentParser(description="CazaDivina Pipeline")
     parser.add_argument("--target-program", help="Nombre del programa objetivo")
     parser.add_argument("--update-intel-only", action="store_true", help="Actualiza solo IntelModule")
