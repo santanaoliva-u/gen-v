@@ -1,150 +1,62 @@
 # modules/recon.py
-import logging
-import os
-from concurrent.futures import ThreadPoolExecutor
-from utils.tool_wrapper import run_tool, is_tool_available
-from modules.database import Database
-import psutil
+# Este archivo define el módulo ReconModule, que realiza reconocimiento de dominios y URLs.
 
+import logging  # Para registrar mensajes (logs)
+import asyncio  # Para manejar tareas asíncronas
+from typing import List, Dict, Any  # Para definir tipos de datos
+from modules.tool_wrapper import run_tool, is_tool_available  # Importa funciones para ejecutar y verificar herramientas
+from modules.database import Database  # Clase para interactuar con la base de datos
+from modules.config import CONFIG  # Configuración del proyecto
+
+# Configura el logger para este módulo
 log = logging.getLogger(__name__)
 
 class ReconModule:
     def __init__(self):
-        self.db = Database()
-        self.max_workers = min(10, psutil.cpu_count(logical=True) * 2)  # Dinámico según CPU
-        self.cache_dir = "output/recon_cache"
-        self.required_tools = ["amass", "subfinder", "assetfinder", "findomain", "dnsx", "httpx", "waybackurls", "gau", "katana"]
+        """Inicializa el módulo de reconocimiento."""
+        self.required_tools = [
+            'amass', 'subfinder', 'assetfinder', 'findomain', 'dnsx', 'httpx',
+            'waybackurls', 'gau', 'katana'
+        ]
 
-    def run(self, program_name: str):
-        log.info(f"Iniciando Reconocimiento para {program_name}...")
-        os.makedirs(self.cache_dir, exist_ok=True)
-
-        # Verificar herramientas
+    async def run(self, data: Any) -> List[Dict]:
+        """Ejecuta el reconocimiento para un programa dado."""
+        log.info("Iniciando reconocimiento...")
+        # Verifica que todas las herramientas estén disponibles
         missing_tools = [tool for tool in self.required_tools if not is_tool_available(tool)]
         if missing_tools:
-            log.error(f"Herramientas faltantes: {', '.join(missing_tools)}. Instálalas antes de continuar.")
-            return [], []
+            log.error(f"Herramientas faltantes para ReconModule: {', '.join(missing_tools)}")
+            return []
 
-        program = self.db.fetch_one("SELECT scope FROM programs WHERE name = ?", (program_name,))
-        domains = program['scope'].split(',') if program else ["myntra.com"]
+        program_name = data if isinstance(data, str) else data.get('program_name', 'Unknown')
+        results = []
+        db = await Database()
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            subdomain_lists = []
-            futures = [executor.submit(self.enumerate_subdomains, (program_name, domain)) for domain in domains]
-            for future in futures:
-                try:
-                    subdomain_lists.append(future.result())
-                except Exception as e:
-                    log.error(f"Error en enumeración de subdominios: {e}")
-
-        subdomains = set(sub for sublist in subdomain_lists for sub in sublist)
-        live_hosts = self.find_live_hosts(subdomains)
-        endpoints = []
-        for host in live_hosts:
-            endpoints.extend(self.discover_endpoints(host))
-
-        return list(live_hosts), endpoints
-
-    def enumerate_subdomains(self, args):
-        program_name, domain = args
-        log.info(f"Enumerando subdominios para {domain}...")
-        cache_file = f"{self.cache_dir}/{program_name}_{domain}_subdomains.txt"
-        if os.path.exists(cache_file):
-            with open(cache_file, 'r') as f:
-                return [line.strip() for line in f if line.strip()]
-
-        subdomains = set()
-        tools = [
-            {"tool": "amass", "command": ["amass", "enum", "-passive", "-d", domain], "output_file": f"output/{program_name}_{domain}_amass.txt"},
-            {"tool": "subfinder", "command": ["subfinder", "-d", domain, "-silent"], "output_file": f"output/{program_name}_{domain}_subfinder.txt"},
-            {"tool": "assetfinder", "command": ["assetfinder", "--subs-only", domain], "output_file": f"output/{program_name}_{domain}_assetfinder.txt"},
-            {"tool": "findomain", "command": ["findomain", "-t", domain, "--quiet"], "output_file": f"output/{program_name}_{domain}_findomain.txt"},
-            {"tool": "dnsx", "command": ["dnsx", "-d", domain, "-silent"], "output_file": f"output/{program_name}_{domain}_dnsx.txt"}
-        ]
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(self._run_tool, tool) for tool in tools]
-            for future in futures:
-                try:
-                    subdomains.update(future.result())
-                except Exception as e:
-                    log.error(f"Error ejecutando herramienta: {e}")
-
-        with open(cache_file, 'w') as f:
-            for sub in subdomains:
-                f.write(f"{sub}\n")
-        return list(subdomains)
-
-    def _run_tool(self, tool_config):
-        command = tool_config['command']
-        output_file = tool_config['output_file']
-        subdomains = set()
+        # Ejemplo: Usa assetfinder para encontrar subdominios
         try:
-            result = run_tool(command, output_file=output_file)
-            if result["returncode"] == 0 and os.path.exists(output_file):
-                with open(output_file, 'r') as f:
-                    for line in f:
-                        sub = line.strip()
-                        if sub:
-                            subdomains.add(sub)
-            else:
-                log.warning(f"Fallo en {command[0]}: {result['stderr']}")
+            cmd = ["assetfinder", "--subs-only", program_name]
+            output = run_tool(cmd)
+            subdomains = output.get('stdout', '').splitlines()
+            for subdomain in subdomains:
+                if subdomain:
+                    results.append({"target": subdomain, "program_name": program_name})
+                    await db.insert_finding_async(
+                        program_name, subdomain, f"https://{subdomain}", "Subdominio encontrado", "Recon", 2.0
+                    )
         except Exception as e:
-            log.error(f"Error ejecutando {command[0]}: {e}")
-        return subdomains
+            log.error(f"Error ejecutando assetfinder: {e}")
 
-    def discover_endpoints(self, host):
-        log.info(f"Buscando endpoints para {host}...")
-        cache_file = f"{self.cache_dir}/{host}_endpoints.txt"
-        if os.path.exists(cache_file):
-            with open(cache_file, 'r') as f:
-                return [line.strip() for line in f if line.strip()]
-
-        endpoints = set()
-        tools = [
-            {"tool": "waybackurls", "command": ["waybackurls", host], "output_file": f"output/{host}_wayback.txt"},
-            {"tool": "gau", "command": ["gau", host], "output_file": f"output/{host}_gau.txt"},
-            {"tool": "katana", "command": ["katana", "-u", f"https://{host}", "-silent"], "output_file": f"output/{host}_katana.txt"}
-        ]
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(self._run_tool, tool) for tool in tools]
-            for future in futures:
-                try:
-                    endpoints.update(future.result())
-                except Exception as e:
-                    log.error(f"Error descubriendo endpoints: {e}")
-
-        with open(cache_file, 'w') as f:
-            for ep in endpoints:
-                f.write(f"{ep}\n")
-        return list(endpoints)
-
-    def find_live_hosts(self, subdomains: set) -> list:
-        log.info("Buscando hosts vivos con httpx...")
-        cache_file = f"{self.cache_dir}/live_hosts.txt"
-        if os.path.exists(cache_file):
-            with open(cache_file, 'r') as f:
-                return [line.strip() for line in f if line.strip()]
-
-        live_hosts = set()
-        temp_file = "output/subdomains_temp.txt"
-        with open(temp_file, 'w') as f:
-            f.write('\n'.join(subdomains) + '\n')
-
-        command = ["httpx", "-l", temp_file, "-silent", "-status-code", "-title"]
+        # Ejemplo: Usa httpx para verificar subdominios activos
         try:
-            result = run_tool(command, output_file="output/live_hosts.txt")
-            if result["returncode"] == 0:
-                for line in result["stdout"].splitlines():
-                    if line.strip():
-                        live_hosts.add(line.split()[0])
-            else:
-                log.warning(f"Fallo en httpx: {result['stderr']}")
+            cmd = ["httpx", "-silent", "-o", f"output/{program_name}/httpx.txt"]
+            output = run_tool(cmd, input='\n'.join([r['target'] for r in results]))
+            active_urls = output.get('stdout', '').splitlines()
+            for url in active_urls:
+                if url:
+                    results.append({"target": url, "program_name": program_name, "url": url})
         except Exception as e:
             log.error(f"Error ejecutando httpx: {e}")
 
-        with open(cache_file, 'w') as f:
-            for host in live_hosts:
-                f.write(f"{host}\n")
-        return list(live_hosts)
+        await db.close_all()
+        log.info(f"Reconocimiento completado para {program_name}. Encontrados {len(results)} resultados.")
+        return results

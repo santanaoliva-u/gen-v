@@ -1,94 +1,131 @@
 # modules/execution.py
-import logging
-import requests
-import re
-from utils.tool_wrapper import run_tool
-from database import Database
-from config import CONFIG
+# Este archivo define el módulo de ejecución, que prueba URLs contra vulnerabilidades como XSS, SQLi, CVEs y fuzzing.
 
+import logging  # Para registrar mensajes (logs) sobre lo que hace el programa
+import requests  # Para hacer solicitudes HTTP (como descargar datos de una API)
+import re  # Para buscar patrones en texto (como IDs de CVEs)
+import subprocess  # Para ejecutar comandos en la terminal
+from modules.tool_wrapper import run_tool  # Importa la función para ejecutar herramientas externas
+from modules.database import Database  # Importa la clase Database para guardar datos
+from modules.config import CONFIG  # Importa la configuración del proyecto
+
+# Configura el logger para este módulo (registra mensajes con el nombre del módulo)
 log = logging.getLogger(__name__)
 
+# Define la clase ExecutionModule, que contiene la lógica para ejecutar pruebas de seguridad
 class ExecutionModule:
-    def __init__(self):
-        self.db = Database()
-        self.program_name = None
+    # Método principal que ejecuta las pruebas. Es asíncrono (usa 'async' para manejar tareas simultáneamente)
+    async def run(self, data: list) -> list:
+        # Si 'data' no es una lista, usa una lista vacía. Esto evita errores si los datos no son válidos
+        findings = data if isinstance(data, list) else []
+        if not findings:
+            # Si no hay datos para procesar, registra un mensaje y retorna una lista vacía
+            log.info("No se recibieron datos para ejecutar.")
+            return []
+        
+        # Crea una instancia de la base de datos para guardar resultados
+        db = await Database()
+        # Obtiene el nombre del programa (por ejemplo, 'Valve') desde los datos o usa 'Valve' por defecto
+        program = findings[0].get('program_name', 'Valve') if findings else 'Valve'
+        # Define el directorio donde se guardarán los resultados
+        out_dir = f"output/{program}"
+        # Crea el directorio si no existe, usando un comando de terminal
+        subprocess.run(f"mkdir -p {out_dir}", shell=True, check=True)
+        
+        # Actualiza la base de datos con información sobre CVEs (vulnerabilidades conocidas)
+        await self.update_cves(db, program)
+        
+        # Lista para almacenar los resultados de las pruebas
+        results = []
+        # Itera sobre cada elemento en 'findings' (datos de entrada)
+        for finding in findings:
+            # Obtiene el objetivo (como un dominio) y la URL a probar
+            target = finding.get('target')
+            url = finding.get('url', f"https://{target}")
+            # Calcula la probabilidad de riesgo (escalada de 0 a 10)
+            prob = finding.get('risk_score', 5.0) / 10
+            
+            # Prueba 1: XSS (Cross-Site Scripting) con la herramienta 'dalfox'
+            cmd = ["dalfox", "url", url, "--waf-bypass", "-o", f"{out_dir}/xss_{hash(url)}.txt"]
+            try:
+                # Ejecuta el comando y captura la salida
+                output = run_tool(cmd)
+                # Si la salida contiene "Found", se detectó un posible XSS
+                if "Found" in output.get('stdout', ''):
+                    # Guarda el resultado en la lista
+                    results.append({"type": "XSS", "url": url, "details": output['stdout']})
+                    # Guarda el hallazgo en la base de datos
+                    await db.insert_finding_async(program, target, url, output['stdout'], "XSS Reflejado", prob * 10)
+            except subprocess.CalledProcessError as e:
+                # Si hay un error, registra el mensaje
+                log.error(f"Error en dalfox: {e}")
+            
+            # Prueba 2: SQL Injection con la herramienta 'sqlmap'
+            # Corrección: se eliminó la coma dentro de "--level=3" y se aseguró que las comillas estén correctas
+            cmd = ["sqlmap", "-u", url, "--batch", "--level=3", "--risk=2", "--dbs", "-o", f"{out_dir}/sqli_{hash(url)}.txt"]
+            try:
+                output = run_tool(cmd)
+                # Si la salida contiene "vulnerable", se detectó una posible inyección SQL
+                if "vulnerable" in output.get('stdout', '').lower():
+                    results.append({"type": "SQLi", "url": url, "details": output['stdout']})
+                    await db.insert_finding_async(program, target, url, output['stdout'], "SQLi", prob * 10)
+            except subprocess.CalledProcessError as e:
+                log.error(f"Error en sqlmap: {e}")
+            
+            # Prueba 3: CVEs con la herramienta 'nuclei'
+            cmd = ["nuclei", "-u", url, "-t", "cves/", "-o", f"{out_dir}/nuclei_{hash(url)}.txt"]
+            try:
+                output = run_tool(cmd)
+                # Si la salida contiene "cve", se detectó una vulnerabilidad conocida
+                if "cve" in output.get('stdout', '').lower():
+                    # Busca un ID de CVE (formato: CVE-YYYY-XXXX)
+                    cve_id = re.search(r"CVE-\d{4}-\d{4,7}", output['stdout'])
+                    results.append({"type": "CVE", "url": url, "details": output['stdout']})
+                    # Guarda el hallazgo con el ID del CVE si se encontró
+                    await db.insert_finding_async(program, target, url, output['stdout'], "CVE", prob * 10, cve_id.group(0) if cve_id else None)
+            except subprocess.CalledProcessError as e:
+                log.error(f"Error en nuclei: {e}")
+            
+            # Prueba 4: Fuzzing con la herramienta 'ffuf'
+            cmd = ["ffuf", "-u", f"{url}/FUZZ", "-w", "modules/xss_payloads.txt", "-o", f"{out_dir}/fuzz_{hash(url)}.txt"]
+            try:
+                output = run_tool(cmd)
+                # Si la salida contiene "200" (código HTTP de éxito), se encontró algo interesante
+                if "200" in output.get('stdout', ''):
+                    results.append({"type": "Fuzz", "url": url, "details": output['stdout']})
+                    await db.insert_finding_async(program, target, url, output['stdout'], "Fuzz", prob * 10)
+            except subprocess.CalledProcessError as e:
+                log.error(f"Error en ffuf: {e}")
+        
+        # Cierra todas las conexiones a la base de datos
+        await db.close_all()
+        # Retorna los resultados encontrados
+        return results
 
-    def run(self, data: tuple) -> tuple:
-        """
-        Run vulnerability analysis on live hosts and endpoints.
-        Expects data as (live_hosts, endpoints) from ReconModule.
-        Returns (live_hosts, endpoints) for downstream modules.
-        """
-        live_hosts, endpoints = data if isinstance(data, tuple) else ([], [])
-        self.program_name = "Valve"  # Set dynamically or pass via config
-        log.info(f"Iniciando Fase 2: Análisis de Vulnerabilidades en {len(live_hosts)} hosts y {len(endpoints)} endpoints...")
-        self.update_cves()  # Update CVEs before scanning
-        for host in live_hosts:
-            self.run_nuclei(host)
-            self.run_dalfox(host, endpoints)
-        return live_hosts, endpoints
-
-    def update_cves(self):
-        """Fetch and update CVE data from NVD API."""
-        log.info("Actualizando base de datos de CVEs...")
-        url = CONFIG["cve"]["api_url"]
-        params = {"resultsPerPage": 100, "startIndex": 0}
+    # Método para actualizar información sobre CVEs desde una API
+    async def update_cves(self, db: Database, program: str):
+        log.info("Actualizando CVEs...")
+        # Obtiene la URL de la API de CVEs desde la configuración
+        url = CONFIG.get("cve", {}).get("api_url")
+        # Define parámetros para la solicitud (limita a 10 resultados)
+        params = {"resultsPerPage": 10, "startIndex": 0}
         try:
-            response = requests.get(url, params=params, timeout=10)
+            # Hace una solicitud HTTP a la API
+            response = requests.get(url, params=params, timeout=5)
             if response.status_code == 200:
-                cves = response.json()["result"]["CVE_Items"]
+                # Si la solicitud es exitosa, extrae los CVEs del JSON
+                cves = response.json().get("result", {}).get("CVE_Items", [])
                 for cve in cves:
+                    # Extrae el ID y la descripción del CVE
                     cve_id = cve["cve"]["CVE_data_meta"]["ID"]
                     description = cve["cve"]["description"]["description_data"][0]["value"]
-                    severity = cve["impact"].get("baseMetricV3", {}).get("cvssV3", {}).get("baseSeverity", "UNKNOWN")
-                    affected = str(cve["configurations"]["nodes"])
-                    last_updated = cve["lastModifiedDate"]
-                    self.db.execute_query(
-                        "INSERT OR REPLACE INTO cves (id, description, severity, affected_products, last_updated) VALUES (?, ?, ?, ?, ?)",
-                        (cve_id, description, severity, affected, last_updated)
+                    # Guarda el CVE en la base de datos
+                    await db.insert_finding_async(
+                        program, "NVD", "", f"CVE {cve_id}: {description}", "CVE", 0.0, cve_id
                     )
             else:
+                # Si la solicitud falla, registra el error
                 log.error(f"Error al actualizar CVEs: HTTP {response.status_code}")
         except Exception as e:
+            # Si ocurre cualquier otro error, registra el mensaje
             log.error(f"Error al actualizar CVEs: {e}")
-
-    def run_nuclei(self, host: str):
-        """Scan host with Nuclei for vulnerabilities."""
-        log.info(f"Escaneando {host} con Nuclei...")
-        command = ["nuclei", "-u", host, "-silent", "-t", "cves,xss,rce"]  # Focus on critical templates
-        results = run_tool(command)
-        if results:
-            self._process_results(host, results)
-
-    def run_dalfox(self, host: str, endpoints: list):
-        """Scan host and endpoints for XSS with Dalfox."""
-        log.info(f"Buscando XSS en {host} con Dalfox...")
-        # Scan the host itself
-        command = ["dalfox", "url", host, "--silence"]
-        results = run_tool(command)
-        if results:
-            self._process_results(host, results)
-        # Scan endpoints if available
-        for endpoint in endpoints:
-            if host in endpoint:  # Only scan endpoints related to this host
-                command = ["dalfox", "url", endpoint, "--silence"]
-                results = run_tool(command)
-                if results:
-                    self._process_results(host, results)
-
-    def _process_results(self, host: str, results: str):
-        """Process scan results and store findings in the database."""
-        for line in results.splitlines():
-            description = line.strip()
-            cve_match = re.search(r"CVE-\d{4}-\d{4,7}", description)
-            cve_id = cve_match.group(0) if cve_match else None
-            self.db.execute_query(
-                "INSERT INTO findings (program_name, target, description, cve, timestamp) VALUES (?, ?, ?, ?, datetime('now'))",
-                (self.program_name, host, description, cve_id)
-            )
-            finding_id = self.db.cursor.lastrowid
-            if cve_id:
-                self.db.execute_query(
-                    "INSERT INTO finding_cves (finding_id, cve_id) VALUES (?, ?)",
-                    (finding_id, cve_id)  # Fixed: Properly closed parenthesis
-                )

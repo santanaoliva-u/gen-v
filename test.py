@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 # test.py
 """
-Archivo de prueba avanzado para depurar problemas en el proyecto CazaDivina Gen-VI.
-Verifica importaciones, sys.path, herramientas externas y conexión a la base de datos.
+Archivo de prueba para depurar problemas en el proyecto CazaDivina Gen-VI.
+Verifica el entorno, importaciones, herramientas externas y la conexión a la base de datos.
 """
 
-import sys
-import os
-import logging
-import json
-from datetime import datetime
-from typing import List
+import sys  # Para manejar el sistema (como sys.path)
+import os  # Para trabajar con directorios
+import logging  # Para registrar mensajes (logs)
+import json  # Para formatear logs como JSON
+import asyncio  # Para manejar tareas asíncronas
+from datetime import datetime  # Para obtener la fecha y hora
+from typing import List  # Para definir tipos de datos
+
+# Importaciones locales
+from modules.database import Database  # Clase para interactuar con la base de datos
+from modules.tool_wrapper import is_tool_available  # Función para verificar herramientas
 
 # Configuración de logging estructurado
 class JsonFormatter(logging.Formatter):
+    """Formatea los logs como JSON para que sean fáciles de leer y analizar."""
     def format(self, record):
         log_entry = {
             "timestamp": datetime.now().isoformat(),
@@ -25,11 +31,12 @@ class JsonFormatter(logging.Formatter):
         }
         return json.dumps(log_entry)
 
+# Configura el logger
 logging.basicConfig(
     level=logging.DEBUG,
     handlers=[
-        logging.FileHandler('output/test.log'),  # Guardar logs en output/test.log
-        logging.StreamHandler(sys.stdout)  # Mostrar en consola
+        logging.FileHandler('output/test.log'),  # Guarda logs en output/test.log
+        logging.StreamHandler(sys.stdout)  # Muestra logs en la consola
     ]
 )
 formatter = JsonFormatter()
@@ -50,21 +57,21 @@ def print_project_info():
         sys.path.append(project_root)
 
 def check_tool_wrapper_import():
-    """Verifica la importación de utils.tool_wrapper.is_tool_available."""
-    log.info("=== Verificando importación de utils.tool_wrapper ===")
+    """Verifica la importación de is_tool_available."""
+    log.info("=== Verificando importación de modules.tool_wrapper ===")
     try:
-        from utils.tool_wrapper import is_tool_available
-        log.info("Importación de utils.tool_wrapper.is_tool_available exitosa")
+        from modules.tool_wrapper import is_tool_available
+        log.info("Importación de modules.tool_wrapper.is_tool_available exitosa")
         return is_tool_available
     except ImportError as e:
-        log.error(f"Error al importar utils.tool_wrapper: {e}")
+        log.error(f"Error al importar modules.tool_wrapper: {e}")
         sys.exit(1)
     except AttributeError as e:
-        log.error(f"Error: utils.tool_wrapper no tiene is_tool_available: {e}")
+        log.error(f"Error: modules.tool_wrapper no tiene is_tool_available: {e}")
         sys.exit(1)
 
 def test_tools(is_tool_available):
-    """Prueba la función is_tool_available con las herramientas requeridas."""
+    """Prueba si las herramientas requeridas están disponibles."""
     log.info("=== Probando herramientas requeridas ===")
     required_tools = [
         'amass', 'subfinder', 'assetfinder', 'findomain', 'dnsx', 'httpx',
@@ -86,22 +93,21 @@ def test_tools(is_tool_available):
     else:
         log.info("Todas las herramientas están disponibles")
 
-def test_database():
+async def test_database():
     """Verifica la conexión y funcionalidad básica de la base de datos."""
     log.info("=== Probando conexión a la base de datos ===")
     try:
-        from database import Database
-        db = Database()
-        # Ejecutar una consulta simple para verificar la conexión
-        result = db.fetch_one("SELECT name FROM sqlite_master WHERE type='table' AND name='programs'")
+        db = await Database()  # Usa await para instanciar Database
+        # Ejecuta una consulta simple para verificar la conexión
+        result = await db.fetch_one_async("SELECT name FROM sqlite_master WHERE type='table' AND name='programs'")
         log.info(f"Tabla 'programs' existe: {bool(result)}")
-        db.close()
+        await db.close_all()  # Cierra todas las conexiones
         log.info("Conexión a la base de datos exitosa")
     except Exception as e:
         log.error(f"Error con la base de datos: {e}")
         sys.exit(1)
 
-def main():
+async def main():
     """Función principal para ejecutar todas las pruebas."""
     log.info("=== Iniciando pruebas avanzadas ===")
     print_project_info()
@@ -113,13 +119,13 @@ def main():
     test_tools(is_tool_available)
     
     # Probar base de datos
-    test_database()
+    await test_database()
     
     log.info("=== Pruebas completadas ===")
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())  # Ejecuta la función asíncrona
     except KeyboardInterrupt:
         log.info("Pruebas interrumpidas por el usuario")
         sys.exit(0)

@@ -1,91 +1,82 @@
+#!/usr/bin/env python3
 # main.py
-import argparse
-import logging
-import logging.handlers
-import yaml
-import importlib
-import sys
-import time
-import json
-import psutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+# Este archivo es el punto de entrada principal para el pipeline de CazaDivina.
+# Carga la configuración, inicializa módulos y ejecuta pruebas de seguridad.
 
-# Importaciones de tus módulos locales
-from modules.database import Database
-from utils.tool_wrapper import is_tool_available # Importa la función específica
+import argparse  # Para manejar argumentos de la línea de comandos
+import logging  # Para registrar mensajes (logs)
+import logging.handlers  # Para rotar archivos de log
+import yaml  # Para leer el archivo de configuración (config.yaml)
+import importlib  # Para importar módulos dinámicamente
+import sys  # Para manejar el sistema (como salir del programa)
+import time  # Para medir el tiempo de ejecución
+import json  # Para formatear logs como JSON
+import psutil  # Para obtener información del sistema (como número de CPUs)
+import asyncio  # Para manejar tareas asíncronas
+import requests  # Para enviar notificaciones a Discord
+from concurrent.futures import ThreadPoolExecutor, as_completed  # Para ejecutar tareas en paralelo
+from datetime import datetime  # Para obtener la fecha y hora
+from typing import Dict, List, Optional, Any  # Para definir tipos de datos
 
-# --- Configuración de Logging Estructurado ---
+# Importaciones locales
+from modules.database import Database  # Clase para interactuar con la base de datos
+from modules.tool_wrapper import run_tool, is_tool_available  # Funciones para ejecutar herramientas y verificar su disponibilidad
+
+# Configuración de Logging
 class JsonFormatter(logging.Formatter):
-    """
-    Formateador de logs que genera salidas en formato JSON.
-    Incluye timestamp, nivel, módulo, mensaje, archivo y línea.
-    """
+    """Formatea los logs como JSON para que sean fáciles de leer y analizar."""
     def format(self, record: logging.LogRecord) -> str:
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "level": record.levelname,
             "module": record.name,
-            "message": record.getMessage(), # Usa getMessage() para manejar % y argumentos
+            "message": record.getMessage(),
             "file": record.pathname,
             "line": record.lineno
         }
         return json.dumps(log_entry)
 
-# Configuración del logger principal
+# Configura el logger
 log = logging.getLogger(__name__)
-log.setLevel(logging.INFO) # Nivel por defecto a INFO, ajusta a DEBUG si necesitas más detalle
-
-# Handler para archivo (RotatingFileHandler para gestionar el tamaño del archivo)
+log.setLevel(logging.INFO)
+# Guarda logs en un archivo que rota cuando alcanza 10MB
 file_handler = logging.handlers.RotatingFileHandler(
-    filename='output/system.log',
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=5
+    filename='output/system.log', maxBytes=10*1024*1024, backupCount=5
 )
 file_handler.setFormatter(JsonFormatter())
 log.addHandler(file_handler)
-
-# Handler para consola
+# Muestra logs en la consola
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(JsonFormatter()) # También usa JSON en consola para consistencia
+console_handler.setFormatter(JsonFormatter())
 log.addHandler(console_handler)
 
-# --- Clase Orchestrator ---
+# Clase Orchestrator: Coordina la ejecución de módulos
 class Orchestrator:
-    """
-    Clase principal para orquestar la ejecución de los módulos de CazaDivina Gen-VI.
-    Gestiona la carga de configuración, validación del entorno, ejecución de módulos
-    en paralelo y la comunicación con la base de datos y Discord.
-    """
     def __init__(self, config_file: str = "config.yaml"):
-        self.db = Database()
-        self.modules: List[Any] = [] # Usamos Any porque los módulos son de tipos variados
-        self.config: Dict[str, Any] = {}
-        self.scope: Dict[str, Any] = {}
-        self.module_dependencies: Dict[str, List[str]] = {}
-        self.max_workers = min(10, psutil.cpu_count(logical=True) * 2 or 1) # Asegura al menos 1 worker
+        """Inicializa el orquestador con un archivo de configuración."""
+        self.db = None  # Conexión a la base de datos (se inicializa después)
+        self.modules: List[Any] = []  # Lista de módulos cargados
+        self.config: Dict[str, Any] = {}  # Configuración cargada desde config.yaml
+        self.scope: Dict[str, Any] = {}  # Alcance del programa (dominios, etc.)
+        self.module_dependencies: Dict[str, List[str]] = {}  # Dependencias entre módulos
+        self.max_workers = min(10, psutil.cpu_count(logical=True) * 2 or 1)  # Número de hilos para ejecutar tareas
+        self.discord_webhook: Optional[str] = None  # URL para notificaciones de Discord
+        self._load_config(config_file)  # Carga la configuración
 
-        self.discord_webhook: Optional[str] = None
-        self._load_config(config_file) # Usamos un método privado para la carga
-
-        # Después de cargar la configuración, validamos el entorno
-        self.validate_environment()
+    async def initialize(self):
+        """Inicializa la base de datos y valida el entorno."""
+        self.db = await Database()  # Crea una instancia de la base de datos
+        await self.validate_environment()  # Verifica que las herramientas estén instaladas
 
     def _load_config(self, config_file: str):
-        """
-        Carga y valida la configuración desde config.yaml.
-        Método privado ya que solo se llama internamente.
-        """
+        """Carga y valida el archivo de configuración (config.yaml)."""
         try:
             with open(config_file, 'r') as f:
-                self.config = yaml.safe_load(f)
-            self._validate_config_schema() # Validar el esquema antes de usar
-
+                self.config = yaml.safe_load(f)  # Lee el archivo YAML
+            self._validate_config_schema()  # Valida que tenga las claves necesarias
             self.module_dependencies = self.config.get('module_dependencies', {})
-            # Mapeo más robusto y centralizado para los módulos
+            # Mapeo de nombres de módulos a archivos en la carpeta modules
             module_map = {
-                'DeepFuzzXSSModule': 'deep_fuzz_xss',
                 'IntelModule': 'intel',
                 'ReconModule': 'recon',
                 'ExecutionModule': 'execution',
@@ -94,294 +85,177 @@ class Orchestrator:
                 'ReportingModule': 'reporting',
                 'LearningModule': 'learning'
             }
-
             for module_name in self.config.get('modules', []):
                 module_file = module_map.get(module_name)
                 if module_file:
                     try:
+                        # Importa el módulo dinámicamente
                         module = importlib.import_module(f"modules.{module_file}")
-                        # Instanciar el módulo y añadirlo a la lista
-                        self.modules.append(getattr(module, module_name)())
+                        module_instance = getattr(module, module_name)()  # Crea una instancia del módulo
+                        # Si el método run es asíncrono, lo envuelve para hacerlo síncrono
+                        if asyncio.iscoroutinefunction(module_instance.run):
+                            module_instance.run = self._wrap_async_run(module_instance.run)
+                        self.modules.append(module_instance)
                         log.info(f"Módulo '{module_name}' cargado exitosamente.")
                     except ImportError as ie:
-                        log.error(f"Error al importar el archivo para el módulo '{module_name}': {ie}. Asegúrate de que '{module_file}.py' exista en la carpeta 'modules'.")
+                        log.error(f"Error al importar '{module_name}': {ie}")
                         sys.exit(1)
                     except AttributeError as ae:
-                        log.error(f"Error al encontrar la clase '{module_name}' en el archivo '{module_file}.py': {ae}. Asegúrate de que el nombre de la clase coincida.")
+                        log.error(f"Error al encontrar '{module_name}' en '{module_file}.py': {ae}")
                         sys.exit(1)
                 else:
-                    log.warning(f"Módulo desconocido o no mapeado en config.yaml: {module_name}. Será ignorado.")
-
+                    log.warning(f"Módulo desconocido: {module_name}")
             self.scope = self.config.get('scope', {})
             self.discord_webhook = self.config.get('discord_webhook')
-
         except FileNotFoundError:
-            log.error(f"Error: Archivo de configuración '{config_file}' no encontrado. Asegúrate de que exista.")
+            log.error(f"Archivo de configuración '{config_file}' no encontrado.")
             sys.exit(1)
         except yaml.YAMLError as ye:
-            log.error(f"Error de formato YAML en '{config_file}': {ye}. Revisa la sintaxis del archivo.")
+            log.error(f"Error de formato YAML en '{config_file}': {ye}")
             sys.exit(1)
         except Exception as e:
-            log.error(f"Error inesperado al cargar la configuración: {e}", exc_info=True)
+            log.error(f"Error al cargar configuración: {e}", exc_info=True)
             sys.exit(1)
 
+    def _wrap_async_run(self, async_run):
+        """Convierte un método asíncrono en síncrono para compatibilidad."""
+        def sync_run(*args, **kwargs):
+            return asyncio.run(async_run(*args, **kwargs))
+        return sync_run
+
     def _validate_config_schema(self):
-        """
-        Valida el esquema básico de config.yaml.
-        Método privado ya que solo se llama internamente.
-        """
+        """Verifica que el archivo config.yaml tenga las claves necesarias."""
         required_keys = ['modules', 'scope']
         for key in required_keys:
             if key not in self.config:
                 log.error(f"Falta clave requerida en config.yaml: '{key}'.")
                 sys.exit(1)
-
         if not self.config['scope'].get('include'):
-            log.error("El scope en config.yaml debe incluir al menos un dominio bajo la clave 'include'.")
+            log.error("El scope debe incluir al menos un dominio en 'include'.")
             sys.exit(1)
 
-    def validate_environment(self):
-        """
-        Verifica la disponibilidad de herramientas externas y la conexión a ngrok antes de iniciar.
-        """
-        log.info("Validando el entorno: herramientas y conexión a Ngrok.")
+    async def validate_environment(self):
+        """Verifica que todas las herramientas necesarias estén instaladas."""
+        log.info("Validando entorno...")
         required_tools = [
             'amass', 'subfinder', 'assetfinder', 'findomain', 'dnsx', 'httpx',
-            'waybackurls', 'gau', 'katana', 'ffuf', 'gobuster', 'dirsearch', 'arjun'
+            'waybackurls', 'gau', 'katana', 'dalfox', 'sqlmap', 'nuclei', 'ffuf', 'wafw00f'
         ]
-
         missing_tools = [tool for tool in required_tools if not is_tool_available(tool)]
         if missing_tools:
-            log.error(f"Herramientas faltantes: {', '.join(missing_tools)}. Por favor, ejecuta 'setup.sh' o instálalas manualmente.")
+            log.error(f"Herramientas faltantes: {', '.join(missing_tools)}")
             sys.exit(1)
-        log.info("Todas las herramientas requeridas están disponibles.")
+        log.info("Todas las herramientas están disponibles.")
 
-        # Validar Ngrok si está configurado
-        ngrok_url = self.config.get('ngrok_url', 'http://localhost:4040/api/tunnels')
-        try:
-            response = requests.get(ngrok_url, timeout=5)
-            response.raise_for_status() # Lanza una excepción para errores 4xx/5xx
-            log.info(f"Conexión a Ngrok exitosa en {ngrok_url}.")
-        except requests.exceptions.ConnectionError:
-            log.error(f"Error: No se pudo conectar a Ngrok en {ngrok_url}. Asegúrate de que Ngrok esté corriendo.")
-            sys.exit(1)
-        except requests.exceptions.Timeout:
-            log.error(f"Error: Tiempo de espera agotado al intentar conectar con Ngrok en {ngrok_url}.")
-            sys.exit(1)
-        except requests.exceptions.RequestException as e:
-            log.error(f"Error de Ngrok: {e}. Asegúrate de que la URL de Ngrok sea correcta y el servicio esté activo.")
-            sys.exit(1)
-
-    def run_full_pipeline(self, program_name: str, selected_modules: Optional[List[str]] = None):
-        """
-        Ejecuta el pipeline completo de módulos con paralelismo inteligente y manejo de dependencias.
-        """
+    async def run_full_pipeline(self, program_name: str, selected_modules: Optional[List[str]] = None):
+        """Ejecuta todos los módulos en el pipeline para un programa dado."""
         start_time = time.time()
-        log.info(f"--- Iniciando pipeline completo para el programa: '{program_name}' ---")
-
-        # Registrar el inicio del pipeline en la base de datos
-        run_id = self.db.execute_query(
-            "INSERT INTO pipeline_runs (program_name, start_time, status) VALUES (?, ?, ?) RETURNING id",
-            (program_name, datetime.now().isoformat(), 'RUNNING')
-        ).fetchone()[0] # Obtener el ID del nuevo registro
-
-        data: Any = program_name # El input inicial es el nombre del programa
+        log.info(f"Iniciando pipeline para: '{program_name}'")
+        # No insertar hallazgos para eventos del pipeline
+        # run_id = await self.db.insert_finding_async(
+        #     program_name, program_name, "", f"Inicio pipeline {program_name}", "Pipeline", 0.0
+        # ) or 0
+        data: Any = program_name
         executed_module_names = set()
-        
-        # Filtrar módulos si se especificaron
-        modules_to_run = [m for m in self.modules if not selected_modules or m.__class__.__name__ in selected_modules]
-        
+        modules_to_run = [
+            m for m in self.modules if not selected_modules or m.__class__.__name__ in selected_modules]
         if not modules_to_run:
-            log.warning("No hay módulos para ejecutar. Verifica tu selección o configuración.")
-            self.db.execute_query(
-                "UPDATE pipeline_runs SET end_time = ?, status = ?, execution_time = ? WHERE id = ?",
-                (datetime.now().isoformat(), 'COMPLETED_NO_MODULES', 0, run_id)
-            )
+            log.warning("No hay módulos para ejecutar.")
+            # No insertar hallazgos para eventos del pipeline
+            # await self.db.insert_finding_async(
+            #     program_name, program_name, "", "Sin módulos ejecutados", "Pipeline", 0.0
+            # )
             return
-
-        # Para asegurar que los módulos se ejecuten en orden de dependencia,
-        # necesitamos un bucle que priorice módulos sin dependencias pendientes.
-        # Esto es una simplificación; un grafo de dependencias sería más robusto para casos complejos.
-        
-        # Diccionario para guardar futuros activos y sus nombres de módulo
-        active_futures: Dict[Any, str] = {}
-        
-        # Bucle principal para la orquestación de módulos
-        while len(executed_module_names) < len(modules_to_run):
-            modules_ready_to_run = []
-            for module in modules_to_run:
-                module_name = module.__class__.__name__
-                if module_name in executed_module_names or module_name in active_futures.values():
-                    continue # Ya ejecutado o en ejecución
-
-                dependencies = self.module_dependencies.get(module_name, [])
-                if all(dep in executed_module_names for dep in dependencies):
-                    modules_ready_to_run.append(module)
-            
-            if not modules_ready_to_run and not active_futures:
-                # No hay módulos listos para ejecutar y no hay módulos activos,
-                # esto podría indicar un ciclo de dependencia o un error de lógica.
-                log.error("¡Advertencia! No hay módulos listos para ejecutar y no hay futuros activos. Posible ciclo de dependencia o error en la lógica de orquestación.")
-                break # Salir para evitar un bucle infinito
-
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Enviar módulos listos para ejecución
-                for module in modules_ready_to_run:
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            while len(executed_module_names) < len(modules_to_run):
+                futures = {}
+                for module in modules_to_run:
                     module_name = module.__class__.__name__
-                    future = executor.submit(self._run_module, module, data, program_name)
-                    active_futures[future] = module_name
-            
-                # Esperar a que los módulos terminen
-                if active_futures: # Solo espera si hay futuros activos
-                    done_futures, _ = as_completed(active_futures, timeout=None).__next__() # Espera al menos uno
-                    
-                    module_name_finished = active_futures.pop(done_futures) # Quita el futuro terminado
-                    executed_module_names.add(module_name_finished)
-                    
+                    if module_name in executed_module_names:
+                        continue
+                    dependencies = self.module_dependencies.get(module_name, [])
+                    if all(dep in executed_module_names for dep in dependencies):
+                        future = executor.submit(self._run_module, module, data, program_name)
+                        futures[future] = module_name
+                if not futures:
+                    log.error("No hay módulos listos para ejecutar. Posible ciclo de dependencias.")
+                    break
+                for future in as_completed(futures):
+                    module_name = futures[future]
                     try:
-                        result = done_futures.result()
+                        result = future.result()
                         if result is not None:
-                            data = result # Actualizar los datos para el siguiente módulo
-                        log.info(f"Módulo '{module_name_finished}' completado exitosamente.")
+                            data = result
+                        log.info(f"Módulo '{module_name}' completado.")
+                        executed_module_names.add(module_name)
                     except Exception as e:
-                        log.error(f"Error crítico en el módulo '{module_name_finished}': {e}", exc_info=True)
-                        self._send_discord_alert(f"Error crítico en el módulo '{module_name_finished}': {str(e)}")
-                        # Decidir si parar el pipeline o continuar (aquí se detiene)
-                        self.db.execute_query(
-                            "UPDATE pipeline_runs SET end_time = ?, status = ?, execution_time = ? WHERE id = ?",
-                            (datetime.now().isoformat(), 'FAILED', time.time() - start_time, run_id)
-                        )
-                        log.error(f"Pipeline terminado prematuramente debido a un error en '{module_name_finished}'.")
-                        return # Terminar la ejecución del pipeline
-
-                time.sleep(0.1) # Pequeña pausa para evitar busy-waiting si no hay módulos listos
-
+                        log.error(f"Error en '{module_name}': {e}", exc_info=True)
+                        await self._send_discord_alert(f"Error en '{module_name}': {str(e)}")
         execution_time = time.time() - start_time
-        final_status = 'COMPLETED' if len(executed_module_names) == len(modules_to_run) else 'COMPLETED_WITH_WARNINGS'
-        self.db.execute_query(
-            "UPDATE pipeline_runs SET end_time = ?, status = ?, execution_time = ? WHERE id = ?",
-            (datetime.now().isoformat(), final_status, execution_time, run_id)
-        )
-        log.info(f"--- Pipeline completado para: '{program_name}' en {execution_time:.2f} segundos ---")
-        self._send_discord_alert(f"Pipeline completado para {program_name} en {execution_time:.2f}s")
-
-    def run_single_module(self, module_name: str, program_name: Optional[str] = None):
-        """
-        Ejecuta un módulo específico por su nombre de clase.
-        """
-        log.info(f"Ejecutando módulo individual: '{module_name}'...")
-        module_found = False
-        for module in self.modules:
-            if module.__class__.__name__ == module_name:
-                module_found = True
-                try:
-                    # 'IntelModule' es especial porque toma el nombre del programa directamente
-                    # Otros módulos tomarían 'data' que no está disponible aquí para un solo módulo.
-                    # Asumimos que si no es IntelModule, puede funcionar sin un input complejo para una ejecución individual.
-                    input_data = program_name if module_name == "IntelModule" else None # O ajustar según el módulo
-                    result = self._run_module(module, input_data, program_name)
-                    log.info(f"Módulo '{module_name}' ejecutado individualmente y completado.")
-                    return result
-                except Exception as e:
-                    log.error(f"Error al ejecutar el módulo '{module_name}' individualmente: {e}", exc_info=True)
-                    self._send_discord_alert(f"Error ejecutando '{module_name}': {str(e)}")
-                    sys.exit(1) # Salir si falla un módulo individual
-        
-        if not module_found:
-            log.error(f"Módulo no encontrado: '{module_name}'. Asegúrate de que el nombre sea correcto y esté configurado en 'config.yaml'.")
-            sys.exit(1)
+        # No insertar hallazgos para eventos del pipeline
+        # await self.db.insert_finding_async(
+        #     program_name, program_name, "", f"Pipeline completado en {execution_time:.2f}s", "Pipeline", 0.0
+        # )
+        log.info(f"Pipeline completado para '{program_name}' en {execution_time:.2f} segundos")
 
     def _run_module(self, module: Any, data: Any, program_name: Optional[str]):
-        """
-        Ejecuta un módulo con lógica de reintentos.
-        Método privado ya que solo se llama internamente.
-        """
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                log.info(f"Ejecutando módulo '{module.__class__.__name__}' (intento {attempt + 1}/{max_retries + 1})...")
-                # Pasar 'program_name' si el módulo es IntelModule, de lo contrario 'data'.
-                # Esto es crucial para la flexibilidad de los módulos.
-                input_for_module = program_name if module.__class__.__name__ == "IntelModule" else data
-                return module.run(input_for_module)
-            except Exception as e:
-                log.error(f"Error en '{module.__class__.__name__}' (intento {attempt + 1}): {e}", exc_info=True)
-                if attempt < max_retries:
-                    log.warning(f"Reintentando el módulo '{module.__class__.__name__}' en 2 segundos...")
-                    time.sleep(2)
-                else:
-                    log.critical(f"El módulo '{module.__class__.__name__}' falló después de {max_retries + 1} intentos. Abortando.")
-                    raise # Relanzar la excepción para que sea manejada por el orquestador
+        """Ejecuta un módulo con los datos proporcionados."""
+        module_name = module.__class__.__name__
+        input_for_module = program_name if module_name == "IntelModule" else data
+        return module.run(input_for_module)
 
-    def _send_discord_alert(self, message: str):
-        """
-        Envía una alerta a Discord si el webhook está configurado.
-        Método privado ya que solo se llama internamente.
-        """
+    async def run_single_module(self, module_name: str, program_name: Optional[str] = None):
+        """Ejecuta un módulo específico."""
+        log.info(f"Ejecutando módulo: '{module_name}'")
+        for module in self.modules:
+            if module.__class__.__name__ == module_name:
+                try:
+                    result = self._run_module(module, program_name if module_name == "IntelModule" else None, program_name)
+                    log.info(f"Módulo '{module_name}' ejecutado.")
+                    return result
+                except Exception as e:
+                    log.error(f"Error al ejecutar '{module_name}': {e}", exc_info=True)
+                    await self._send_discord_alert(f"Error ejecutando '{module_name}': {str(e)}")
+                    sys.exit(1)
+        log.error(f"Módulo no encontrado: '{module_name}'")
+        sys.exit(1)
+
+    async def _send_discord_alert(self, message: str):
+        """Envía una alerta a Discord si está configurado."""
         if not self.discord_webhook:
             return
         try:
             embed = {
-                "title": "CazaDivina Gen-VI Alerta",
+                "title": "CazaDivina Alerta",
                 "description": message,
-                "color": 0xFF0000, # Rojo para alertas
+                "color": 0xFF0000,
                 "timestamp": datetime.now().isoformat()
             }
             data = {"embeds": [embed]}
             requests.post(self.discord_webhook, json=data, timeout=5)
-            log.info("Alerta de Discord enviada exitosamente.")
+            log.info("Alerta de Discord enviada.")
         except requests.exceptions.RequestException as e:
-            log.error(f"Error al enviar alerta a Discord: {e}. Revisa la URL del webhook.")
-        except Exception as e:
-            log.error(f"Error inesperado al enviar alerta a Discord: {e}", exc_info=True)
+            log.error(f"Error al enviar alerta a Discord: {e}")
 
-# --- Función Principal ---
-def main():
-    """
-    Función de entrada principal para el script CazaDivina Gen-VI.
-    Configura el analizador de argumentos y delega la ejecución al Orchestrator.
-    """
-    parser = argparse.ArgumentParser(
-        description="CazaDivina Gen-VI Pipeline de Seguridad Ofensiva Inteligente",
-        formatter_class=argparse.RawTextHelpFormatter # Para formato de ayuda con saltos de línea
-    )
-    parser.add_argument(
-        "--target-program",
-        help="Nombre del programa de bug bounty o dominio objetivo (ej: 'www.google.com' o 'MiPrograma')."
-    )
-    parser.add_argument(
-        "--update-intel-only",
-        action="store_true",
-        help="Actualiza solo el 'IntelModule' para recopilar información más reciente."
-    )
-    parser.add_argument(
-        "--modules",
-        nargs='+', # Permite 0 o más argumentos
-        help="Ejecuta módulos específicos por sus nombres de clase (ej: --modules ReconModule ExecutionModule).\n"
-             "Si no se especifica, se ejecutan todos los módulos configurados en 'config.yaml'."
-    )
-    parser.add_argument(
-        "--config",
-        default="config.yaml",
-        help="Ruta al archivo de configuración (por defecto: 'config.yaml')."
-    )
-
+async def main():
+    """Función principal que maneja los argumentos y ejecuta el pipeline."""
+    parser = argparse.ArgumentParser(description="CazaDivina Pipeline")
+    parser.add_argument("--target-program", help="Nombre del programa objetivo")
+    parser.add_argument("--update-intel-only", action="store_true", help="Actualiza solo IntelModule")
+    parser.add_argument("--modules", nargs='+', help="Módulos específicos")
+    parser.add_argument("--config", default="config.yaml", help="Archivo de configuración")
     args = parser.parse_args()
-
-    # Inicializar el orquestador con el archivo de configuración especificado
     orchestrator = Orchestrator(config_file=args.config)
-    
-    # Lógica de ejecución basada en los argumentos
+    await orchestrator.initialize()
     if args.update_intel_only:
-        log.info("Modo 'actualizar solo IntelModule' activado.")
-        orchestrator.run_single_module("IntelModule", None) # IntelModule necesita un programa, aquí lo pasamos como None o ajustar.
+        await orchestrator.run_single_module("IntelModule", args.target_program)
     elif args.target_program:
-        log.info(f"Iniciando el pipeline para el programa objetivo: '{args.target_program}'.")
-        orchestrator.run_full_pipeline(args.target_program, args.modules)
+        await orchestrator.run_full_pipeline(args.target_program, args.modules)
     else:
-        log.warning("No se especificó un programa objetivo ni la opción de actualización de Intel. Mostrando ayuda.")
+        log.warning("No se especificó programa objetivo.")
         parser.print_help()
         sys.exit(1)
+    await orchestrator.db.close_all()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
